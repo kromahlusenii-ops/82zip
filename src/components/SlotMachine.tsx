@@ -5,8 +5,8 @@ import { TEAMS, DECADES } from '../engine/types';
 // Tuning
 // ---------------------------------------------------------------------------
 const SPIN_DURATION_MS = 1400;
-const TICK_MIN_MS      = 40;
-const TICK_MAX_MS      = 240;
+const TICK_MIN_MS      = 25;      // ~40fps flicker at peak speed
+const TICK_MAX_MS      = 140;     // still visibly cycling near the end
 
 // ---------------------------------------------------------------------------
 // Types
