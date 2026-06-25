@@ -2,11 +2,11 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { TEAMS, DECADES } from '../engine/types';
 
 // ---------------------------------------------------------------------------
-// Tuning constants
+// Tuning
 // ---------------------------------------------------------------------------
 const SPIN_DURATION_MS = 1400;
-const TICK_MIN_MS      = 40;      // fastest swap interval
-const TICK_MAX_MS      = 240;     // slowest swap interval (right before lock)
+const TICK_MIN_MS      = 40;
+const TICK_MAX_MS      = 240;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -22,36 +22,38 @@ interface Props {
   onAnimationDone?: () => void;
 }
 
-type Phase = 'idle' | 'spinning';
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+const TEAM_CODES = TEAMS.map(t => t.code);
+const DECADE_LABELS = (DECADES as readonly string[]).map(d => d.replace('s', "'s"));
 
-// ---------------------------------------------------------------------------
-// Helpers — pure functions, no React state
-// ---------------------------------------------------------------------------
-const randomTeamCode = () => TEAMS[Math.floor(Math.random() * TEAMS.length)].code;
-const randomDecade   = () => {
-  const d = DECADES[Math.floor(Math.random() * DECADES.length)];
-  return d.replace('s', "'s");
-};
+const randFrom = (arr: string[]) => arr[Math.floor(Math.random() * arr.length)];
 
 const prefersReducedMotion = () =>
   typeof window !== 'undefined' &&
   window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
-function clamp(v: number, lo: number, hi: number) { return Math.min(hi, Math.max(lo, v)); }
-function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
-
 // ---------------------------------------------------------------------------
 // Component
+//
+// Key design: during the spin animation we write text directly to DOM refs
+// instead of calling setState on every tick. This avoids ~35 React re-renders
+// per spin and eliminates the jitter caused by React's reconciliation batching.
+// React state is only set at start (phase → spinning) and at lock (phase → idle).
 // ---------------------------------------------------------------------------
 export function SlotMachine({
   spin, onSpin, onSkipTeam, onSkipEra,
   disabled, canSkipTeam, canSkipEra, onAnimationDone,
 }: Props) {
-  const [phase, setPhase] = useState<Phase>('idle');
-  const [displayTeam, setDisplayTeam] = useState('???');
-  const [displayEra, setDisplayEra]   = useState('???');
+  const [phase, setPhase] = useState<'idle' | 'spinning'>('idle');
 
-  // Refs for the RAF loop — avoid stale closures
+  // DOM refs for direct text manipulation during spin
+  const teamTextRef = useRef<HTMLDivElement>(null);
+  const eraTextRef  = useRef<HTMLDivElement>(null);
+  const teamNameRef = useRef<HTMLDivElement>(null);
+
+  // Animation state (all in refs, no React re-renders during spin)
   const rafRef        = useRef<number | null>(null);
   const startRef      = useRef(0);
   const lastTickRef   = useRef(0);
@@ -60,57 +62,72 @@ export function SlotMachine({
   const animTeamRef   = useRef(false);
   const animEraRef    = useRef(false);
   const doneRef       = useRef<(() => void) | undefined>(undefined);
+  const spinRef       = useRef(spin);
 
-  // Keep doneRef in sync so the RAF callback sees the latest onAnimationDone
   useEffect(() => { doneRef.current = onAnimationDone; }, [onAnimationDone]);
+  useEffect(() => { spinRef.current = spin; }, [spin]);
 
   // Cleanup on unmount
   useEffect(() => () => {
     if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
   }, []);
 
-  // ---- RAF loop ----
+  // ---- Direct-DOM text writers (no React setState) ----
+  const writeTeam = (text: string) => {
+    if (teamTextRef.current) teamTextRef.current.textContent = text;
+  };
+  const writeEra = (text: string) => {
+    if (eraTextRef.current) eraTextRef.current.textContent = text;
+  };
+  const writeTeamName = (text: string) => {
+    if (teamNameRef.current) teamNameRef.current.textContent = text;
+  };
+
+  // ---- RAF loop — zero React renders, pure DOM writes ----
   const tick = useCallback((now: number) => {
-    const elapsed = now - startRef.current;
-    const progress = clamp(elapsed / SPIN_DURATION_MS, 0, 1);
+    const elapsed  = now - startRef.current;
+    const progress = Math.min(elapsed / SPIN_DURATION_MS, 1);
 
     if (progress >= 1) {
-      // Lock: snap to committed values
-      if (animTeamRef.current) setDisplayTeam(targetTeamRef.current);
-      if (animEraRef.current)  setDisplayEra(targetEraRef.current);
+      // Lock: snap to final values
+      if (animTeamRef.current) writeTeam(targetTeamRef.current);
+      if (animEraRef.current)  writeEra(targetEraRef.current);
       animTeamRef.current = false;
       animEraRef.current  = false;
-      setPhase('idle');
       rafRef.current = null;
+      // Show team name after lock
+      const s = spinRef.current;
+      writeTeamName(s ? s.team.name : '\u00A0');
+      // Single React state update at end
+      setPhase('idle');
       doneRef.current?.();
       return;
     }
 
-    // Ease-out cubic: fast at start, decelerates toward end
+    // Ease-out cubic
     const eased    = 1 - Math.pow(1 - progress, 3);
-    const interval = lerp(TICK_MIN_MS, TICK_MAX_MS, eased);
+    const interval = TICK_MIN_MS + (TICK_MAX_MS - TICK_MIN_MS) * eased;
 
-    // Only swap when enough time has passed since the last tick
     if (now - lastTickRef.current >= interval) {
       lastTickRef.current = now;
-      if (animTeamRef.current) setDisplayTeam(randomTeamCode());
-      if (animEraRef.current)  setDisplayEra(randomDecade());
+      if (animTeamRef.current) writeTeam(randFrom(TEAM_CODES));
+      if (animEraRef.current)  writeEra(randFrom(DECADE_LABELS));
     }
 
     rafRef.current = requestAnimationFrame(tick);
-  }, []);  // stable — reads everything from refs
+  }, []);
 
   const startAnimation = useCallback((team: boolean, era: boolean, targetTeam: string, targetEra: string) => {
-    // Cancel any in-flight animation
     if (rafRef.current !== null) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
 
-    // Reduced motion: instant reveal
     if (prefersReducedMotion()) {
-      if (team) setDisplayTeam(targetTeam);
-      if (era)  setDisplayEra(targetEra);
+      if (team) writeTeam(targetTeam);
+      if (era)  writeEra(targetEra);
+      const s = spinRef.current;
+      writeTeamName(s ? s.team.name : '\u00A0');
       setPhase('idle');
       doneRef.current?.();
       return;
@@ -120,21 +137,31 @@ export function SlotMachine({
     targetEraRef.current  = targetEra;
     animTeamRef.current   = team;
     animEraRef.current    = era;
+
+    // Hide team name during spin
+    writeTeamName('\u00A0');
+
     setPhase('spinning');
 
     const now = performance.now();
     startRef.current    = now;
-    lastTickRef.current = now;  // FIX: seed to now, not 0
+    lastTickRef.current = now;
     rafRef.current = requestAnimationFrame(tick);
   }, [tick]);
 
-  // ---- Watch for spin prop changes from game store ----
+  // ---- Watch for spin prop changes ----
   const prevSpinRef = useRef(spin);
   useEffect(() => {
     const prev = prevSpinRef.current;
     prevSpinRef.current = spin;
 
-    if (!spin) return;
+    if (!spin) {
+      // Round cleared — reset display
+      writeTeam('???');
+      writeEra('???');
+      writeTeamName('\u00A0');
+      return;
+    }
     if (prev === spin) return;
 
     const teamChanged = !prev || prev.team.code !== spin.team.code;
@@ -146,14 +173,6 @@ export function SlotMachine({
       spin.decade.replace('s', "'s"),
     );
   }, [spin, startAnimation]);
-
-  // Reset display when spin clears (new round)
-  useEffect(() => {
-    if (!spin && phase === 'idle') {
-      setDisplayTeam('???');
-      setDisplayEra('???');
-    }
-  }, [spin, phase]);
 
   // ---- Handlers ----
   const handleSpin     = () => { if (phase !== 'spinning') onSpin(); };
@@ -169,18 +188,24 @@ export function SlotMachine({
         {/* TEAM reel */}
         <div className="flex-1 rounded-xl border-3 border-orange-500 bg-white p-4 text-center overflow-hidden">
           <div className="text-xs font-bold text-orange-500 uppercase tracking-wider mb-1">Team</div>
-          <div className="text-3xl font-black text-gray-900 h-10 flex items-center justify-center">
-            {displayTeam}
+          <div
+            ref={teamTextRef}
+            className="text-3xl font-black text-gray-900 h-10 flex items-center justify-center"
+          >
+            ???
           </div>
-          <div className="text-xs text-gray-500 mt-1 h-4 truncate">
-            {spin && !isSpinning ? spin.team.name : '\u00A0'}
+          <div ref={teamNameRef} className="text-xs text-gray-500 mt-1 h-4 truncate">
+            {'\u00A0'}
           </div>
         </div>
         {/* ERA reel */}
         <div className="flex-1 rounded-xl border-3 border-purple-500 bg-white p-4 text-center overflow-hidden">
           <div className="text-xs font-bold text-purple-500 uppercase tracking-wider mb-1">Era</div>
-          <div className="text-3xl font-black text-gray-900 h-10 flex items-center justify-center">
-            {displayEra}
+          <div
+            ref={eraTextRef}
+            className="text-3xl font-black text-gray-900 h-10 flex items-center justify-center"
+          >
+            ???
           </div>
           <div className="text-xs text-gray-500 mt-1 h-4">Decade</div>
         </div>
